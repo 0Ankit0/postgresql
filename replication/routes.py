@@ -35,11 +35,15 @@ def get_runtime_engine(request: Request,db: Optional[str] = None):
 
 router = APIRouter(
     prefix="/replication",
-    tags=["replication"]
+    tags=["Sequential Replication"]
 )
 
 @router.post("/create_db")
 async def create_db(db_name: str):
+    """
+    [Main Server]
+    Creates a new database with the given name on the main server. If the database already exists, returns a message indicating so.
+    """
     raw_conn = engine.raw_connection()
     try:
         raw_conn.set_isolation_level(0)  # AUTOCOMMIT
@@ -56,6 +60,10 @@ async def create_db(db_name: str):
 
 @router.post("/get_db_list")
 async def get_db_list(engine = Depends(get_runtime_engine)):
+    """
+    [Main or Replica Server]
+    Returns a list of all databases present on the connected server (main or replica).
+    """
     with engine.connect() as connection:
         result = connection.execute(text("SELECT datname FROM pg_database"))
         db_list = [row[0] for row in result]
@@ -63,6 +71,10 @@ async def get_db_list(engine = Depends(get_runtime_engine)):
 
 @router.post("/get_current_db")
 async def get_current_db(engine = Depends(get_runtime_engine)):
+    """
+    [Main or Replica Server]
+    Returns the name of the current database for the connected server.
+    """
     with engine.connect() as connection:
         result = connection.execute(text("SELECT current_database()"))
         db_name = result.fetchone()[0]
@@ -70,6 +82,10 @@ async def get_current_db(engine = Depends(get_runtime_engine)):
     
 @router.post("/set_current_db")
 async def set_current_db(request: Request, db_name: str):
+    """
+    [Session Only]
+    Sets the current database for the session (does not change the database on the server, only for the API session context).
+    """
     request.session["db_name"] = db_name
     return {"message": f"Current database set to {db_name}"}
 
@@ -82,6 +98,10 @@ class WALLevel(str, Enum):
 async def set_wal_level(
     wal_level: WALLevel = Query(...),
     engine = Depends(get_runtime_engine)):
+    """
+    [Main Server]
+    Sets the WAL (Write-Ahead Logging) level for the main server. Required for configuring replication. Reloads the server configuration after change.
+    """
     raw_conn = engine.raw_connection()
     try:
         raw_conn.set_isolation_level(0)  # AUTOCOMMIT
@@ -97,6 +117,10 @@ async def set_wal_level(
 async def set_max_wal_senders(
     max_wal_senders: int = Query(..., ge=0),
     engine = Depends(get_runtime_engine)):
+    """
+    [Main Server]
+    Sets the maximum number of WAL sender processes for the main server. This is required for supporting multiple replication connections. Reloads the server configuration after change.
+    """
     raw_conn = engine.raw_connection()
     try:
         raw_conn.set_isolation_level(0)  # AUTOCOMMIT
@@ -110,6 +134,10 @@ async def set_max_wal_senders(
 
 @router.get("/get_hba_file")
 async def get_hba_file(engine = Depends(get_runtime_engine)):
+    """
+    [Main Server Only]
+    Returns the path and content of the pg_hba.conf file for the main (primary) server. This file controls client authentication and must be updated on the main server to allow replication connections from replicas.
+    """
     with engine.connect() as connection:
         hba_file_path = connection.execute(text("SHOW hba_file")).fetchone()[0]
     with open(hba_file_path, 'r') as file:
@@ -124,6 +152,10 @@ async def replace_hba_file(
     data: HBAFileContent,
     engine = Depends(get_runtime_engine)
 ):
+    """
+    [Main Server Only]
+    Replaces the content of the pg_hba.conf file for the main (primary) server with the provided content, then reloads the configuration. This is required to allow replication connections from replicas.
+    """
     with engine.connect() as connection:
         hba_file_path = connection.execute(text("SHOW hba_file")).fetchone()[0]
     with open(hba_file_path, 'w') as file:
@@ -139,6 +171,10 @@ async def add_replication_user(
     password: str,
     engine = Depends(get_runtime_engine)
 ):
+    """
+    [Main Server]
+    Creates a new replication user on the main server with the provided username and password. The user will have REPLICATION privileges.
+    """
     try:
         with engine.connect() as connection:
             result = connection.execute(text(f"CREATE USER {username} WITH PASSWORD '{password}' REPLICATION")).fetchone()
@@ -157,6 +193,10 @@ async def set_replica_server(
     request: Request,
     conn_info: PrimaryConnInfo,
 ):
+    """
+    [Replica Server]
+    Sets the primary server connection info on the replica server for streaming replication. Updates the replica's configuration to connect to the main server.
+    """
     engine  = get_runtime_engine(db=conn_info.replication_database,request=request)
     raw_conn = engine.raw_connection()
     try:
@@ -171,6 +211,10 @@ async def set_replica_server(
 
 @router.get("/get_data_directory")
 async def get_data_directory(engine = Depends(get_runtime_engine)):
+    """
+    [Main Server]
+    Returns the data directory path for the connected server (where the database files are stored).
+    """
     with engine.connect() as connection:
         data_directory = connection.execute(text("SHOW data_directory")).fetchone()[0]
     return {"data_directory": data_directory}
@@ -185,6 +229,10 @@ class BaseBackupRequest(BaseModel):
 
 @router.post("/run_basebackup")
 async def run_basebackup(request: BaseBackupRequest):
+    """
+    [Replica Server]
+    Runs pg_basebackup on the replica server to copy the database cluster from the main server. This is used to initialize the replica's data directory.
+    """
     env = os.environ.copy()
     env["PGPASSWORD"] = request.replication_password
     POSTGRES_OS_USER = os.getenv("POSTGRES_OS_USER", "postgres")
@@ -216,6 +264,10 @@ class ReplicaConfig(BaseModel):
 # should start in a different port than primary server
 @router.post("/start_replica_server")
 async def start_replica_server(config: ReplicaConfig, engine = Depends(get_runtime_engine)):
+    """
+    [Replica Server]
+    Starts the PostgreSQL server on the replica, typically on a different port than the main server. Uses the provided data directory and log file.
+    """
     POSTGRES_OS_USER = os.getenv("POSTGRES_OS_USER", "postgres")
     SUDO_PASSWORD = os.getenv("SUDO_PASSWORD")
     try:
@@ -240,12 +292,20 @@ async def start_replica_server(config: ReplicaConfig, engine = Depends(get_runti
 
 @router.post("/is_replica")
 async def is_replica(engine = Depends(get_runtime_engine)):
+    """
+    [Main or Replica Server]
+    Checks if the connected server is running as a replica (in recovery mode). Returns True if it is a replica, False if it is the main server.
+    """
     with engine.connect() as connection:
         result = connection.execute(text("SELECT pg_is_in_recovery()")).fetchone()[0]
     return {"is_replica": result}
 
 @router.post("/stop_replica_server")
 async def stop_replica_server(config: ReplicaConfig, engine = Depends(get_runtime_engine)):
+    """
+    [Replica Server]
+    Stops the PostgreSQL server running as a replica, using the provided data directory and log file.
+    """
     POSTGRES_OS_USER = os.getenv("POSTGRES_OS_USER", "postgres")
     SUDO_PASSWORD = os.getenv("SUDO_PASSWORD")
     try:
@@ -268,6 +328,10 @@ async def stop_replica_server(config: ReplicaConfig, engine = Depends(get_runtim
 
 @router.post("/drop_db")
 async def drop_db(request: Request, engine = Depends(get_runtime_engine)):
+    """
+    [Main Server]
+    Drops the current database for the connected server. Terminates all connections to the database before dropping it. After dropping, resets the session database to 'postgres'.The database to run the drop from should be different than the one being dropped, so it can be used to execute the drop command.
+    """
     with engine.connect() as connection:
         db_name = connection.execute(text("SELECT current_database()")).fetchone()[0]
     admin_engine = create_engine(os.getenv("DATABASE_URL", ""))
