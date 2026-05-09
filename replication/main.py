@@ -9,6 +9,7 @@ load_dotenv()  # Load environment variables from .env file
 
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET_KEY","default"))
+
 app.include_router(router)
 
 @app.get("/")
